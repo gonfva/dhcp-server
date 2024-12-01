@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 
@@ -8,11 +9,12 @@ import (
 )
 
 type Handler struct {
-	subnet  net.IP
-	gateway net.IP
-	dns     net.IP
-	server  net.IP
-	pool    AllocationPool
+	responsePort int
+	subnet       net.IP
+	gateway      net.IP
+	dns          net.IP
+	server       net.IP
+	pool         AllocationPool
 }
 
 func (h *Handler) handler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) {
@@ -21,9 +23,9 @@ func (h *Handler) handler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) 
 
 	switch m.MessageType() {
 	case dhcpv4.MessageTypeDiscover:
-		h.proposeAddress(conn, peer, m)
+		h.discoveryResponse(conn, peer, m)
 	case dhcpv4.MessageTypeRequest:
-		h.confirmAddress(conn, peer, m)
+		h.requestResponse(conn, peer, m)
 	case dhcpv4.MessageTypeRelease:
 		h.releaseAddress(conn, peer, m)
 	default:
@@ -33,19 +35,21 @@ func (h *Handler) handler(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) 
 
 }
 
-func (h *Handler) proposeAddress(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) {
-	log.Println("Proposing address")
+func (h *Handler) discoveryResponse(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) {
+	log.Printf("DISCOVERY response %v\n", peer)
 	// Allocate an IP address from your pool
-	ipAddr, err := h.pool.allocateIPAddress()
+	ipAddr, err := h.pool.allocateIPAddress(&m.ClientHWAddr)
 	if err != nil {
 		log.Println("Error allocating a new address")
 		return
 	}
+	log.Printf("Address allocated %v\n", ipAddr)
 	response, err := dhcpv4.New(
 		dhcpv4.WithTransactionID(m.TransactionID),
 		dhcpv4.WithHwAddr(m.ClientHWAddr),
-		dhcpv4.WithYourIP(ipAddr),
+		dhcpv4.WithYourIP(net.ParseIP(ipAddr)),
 		dhcpv4.WithServerIP(h.server),
+		dhcpv4.WithBroadcast(true),
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeOffer),
 		dhcpv4.WithDNS(h.dns),
 		dhcpv4.WithGatewayIP(h.gateway),
@@ -54,16 +58,32 @@ func (h *Handler) proposeAddress(conn net.PacketConn, peer net.Addr, m *dhcpv4.D
 		log.Println("Error generating packet")
 		return
 	}
-
+	log.Printf("Sending packet %v\n", response)
 	// Send the response packet
-	if _, err := conn.WriteTo(response.ToBytes(), peer); err != nil {
+	if err := sendUDPPacket(peer, response.ToBytes()); err != nil {
 		log.Printf("Error sending DHCP response: %v\n", err)
 	}
-	log.Printf("Packet sent %v\n", response)
 }
 
-func (h *Handler) confirmAddress(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) {
-	log.Println("Confirming address")
+func sendUDPPacket(addr net.Addr, message []byte) error {
+	conn, err := net.Dial("udp", addr.String())
+	if err != nil {
+		return fmt.Errorf("error creating UDP connection: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.Write(message)
+	if err != nil {
+
+		return fmt.Errorf("error sending UDP packet: %v", err)
+	}
+
+	log.Println("UDP packet sent successfully!")
+	return nil
+}
+
+func (h *Handler) requestResponse(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4) {
+	log.Println("REQUEST response")
 	//Wed don't confirm
 	response, err := dhcpv4.New(
 		dhcpv4.WithTransactionID(m.TransactionID),
@@ -78,7 +98,7 @@ func (h *Handler) confirmAddress(conn net.PacketConn, peer net.Addr, m *dhcpv4.D
 	}
 
 	// Send the response packet
-	if _, err := conn.WriteTo(response.ToBytes(), peer); err != nil {
+	if err := sendUDPPacket(peer, response.ToBytes()); err != nil {
 		log.Printf("Error sending DHCP response: %v\n", err)
 	}
 	log.Printf("Packet sent %v\n", response)
@@ -104,7 +124,7 @@ func (h *Handler) releaseAddress(conn net.PacketConn, peer net.Addr, m *dhcpv4.D
 	}
 
 	// Send the response packet
-	if _, err := conn.WriteTo(response.ToBytes(), peer); err != nil {
+	if err := sendUDPPacket(peer, response.ToBytes()); err != nil {
 		log.Printf("Error sending DHCP response: %v\n", err)
 	}
 	log.Printf("Packet sent %v\n", response)
